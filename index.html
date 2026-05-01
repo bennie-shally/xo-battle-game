@@ -209,6 +209,11 @@
             animation: winPulse 1s infinite;
         }
 
+        .cell.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
         @keyframes popIn {
             0% { transform: scale(0) rotate(-180deg); opacity: 0; }
             100% { transform: scale(1) rotate(0deg); opacity: 1; }
@@ -355,6 +360,11 @@
             background: var(--card);
             color: var(--text);
             border: 2px solid rgba(255,255,255,0.1);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #ff4757, #cc0033);
+            color: white;
         }
 
         .btn:active {
@@ -537,20 +547,6 @@
             .mode-btn { padding: 15px 10px; font-size: 0.9rem; }
         }
 
-        .loader {
-            width: 40px;
-            height: 40px;
-            border: 3px solid rgba(255,255,255,0.1);
-            border-top-color: var(--accent);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        .hidden { display: none !important; }
-
         .toast {
             position: fixed;
             bottom: 30px;
@@ -602,7 +598,58 @@
             font-weight: 700;
             cursor: pointer;
             font-size: 1rem;
+            margin-bottom: 8px;
         }
+
+        .leave-btn {
+            width: 100%;
+            padding: 12px;
+            background: rgba(255, 71, 87, 0.2);
+            border: 2px solid var(--lose);
+            border-radius: 10px;
+            color: var(--lose);
+            font-weight: 700;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        .player-slots {
+            display: flex;
+            justify-content: space-between;
+            margin: 15px 0;
+            gap: 10px;
+        }
+
+        .slot {
+            flex: 1;
+            padding: 10px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            text-align: center;
+            font-size: 0.85rem;
+            border: 2px solid transparent;
+        }
+
+        .slot.active-x {
+            border-color: var(--accent);
+            background: rgba(0, 212, 255, 0.1);
+        }
+
+        .slot.active-o {
+            border-color: var(--accent2);
+            background: rgba(255, 0, 110, 0.1);
+        }
+
+        .slot.occupied {
+            opacity: 1;
+        }
+
+        .slot.empty {
+            opacity: 0.5;
+            font-style: italic;
+        }
+
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
@@ -658,6 +705,18 @@
                 <p style="color: var(--muted); font-size: 0.85rem; margin-bottom: 8px;">Share this link:</p>
                 <div class="share-link" id="shareLink" onclick="copyLink()"></div>
                 <button class="share-btn" onclick="shareRoom()">📋 Copy Room Code</button>
+                <button class="leave-btn" onclick="leaveRoom()">🚪 Leave Room</button>
+            </div>
+
+            <div class="player-slots" id="playerSlots" style="display: none;">
+                <div class="slot active-x" id="slotX">
+                    <div style="font-size: 1.5rem; font-weight: 800; color: var(--accent);">X</div>
+                    <div id="slotXName">Waiting...</div>
+                </div>
+                <div class="slot active-o" id="slotO">
+                    <div style="font-size: 1.5rem; font-weight: 800; color: var(--accent2);">O</div>
+                    <div id="slotOName">Waiting...</div>
+                </div>
             </div>
             
             <div class="online-status disconnected" id="onlineStatus">
@@ -732,7 +791,7 @@
 
     <script>
         // ============================================
-        // FIREBASE CONFIG - YOUR CONFIG
+        // FIREBASE CONFIG
         // ============================================
         const firebaseConfig = {
             apiKey: "AIzaSyCtOqYuWSIkvFq74z6dsxx86YnW-5DyqtQ",
@@ -743,22 +802,27 @@
             appId: "1:760606668054:web:be50639c6c23a98ecfcc37"
         };
 
-        // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        // Game State
+        // ============================================
+        // GAME STATE
+        // ============================================
         let board = ['', '', '', '', '', '', '', '', ''];
         let currentPlayer = 'X';
         let gameActive = true;
         let mode = 'ai';
         let difficulty = 'easy';
         let scores = { X: 0, O: 0, draw: 0 };
+        
+        // Online state
         let roomId = '';
         let mySymbol = 'X';
+        let myPlayerId = '';
         let isHost = false;
         let roomListener = null;
         let myTurn = true;
+        let opponentConnected = false;
 
         // DOM Elements
         const cells = document.querySelectorAll('.cell');
@@ -771,7 +835,13 @@
         const playerOName = document.getElementById('playerOName');
         const shareSection = document.getElementById('shareSection');
         const shareLink = document.getElementById('shareLink');
+        const playerSlots = document.getElementById('playerSlots');
+        const slotXName = document.getElementById('slotXName');
+        const slotOName = document.getElementById('slotOName');
 
+        // ============================================
+        // INITIALIZATION
+        // ============================================
         function init() {
             createParticles();
             cells.forEach(cell => {
@@ -796,12 +866,12 @@
             }
         }
 
-        // Mode Selection
+        // ============================================
+        // MODE SELECTION
+        // ============================================
         function setMode(selectedMode) {
-            if (roomListener) {
-                roomListener();
-                roomListener = null;
-            }
+            // Clean up existing room
+            leaveRoomSilent();
             
             mode = selectedMode;
             document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
@@ -810,14 +880,17 @@
             document.getElementById('difficultySelect').classList.toggle('hidden', mode !== 'ai');
             onlineSection.classList.toggle('active', mode === 'online' || mode === 'online-host');
             shareSection.style.display = 'none';
+            playerSlots.style.display = 'none';
             
             if (mode === 'local') {
                 playerXName.textContent = 'Player 1';
                 playerOName.textContent = 'Player 2';
+                mySymbol = 'X';
                 myTurn = true;
             } else if (mode === 'ai') {
                 playerXName.textContent = 'You';
                 playerOName.textContent = 'Robot';
+                mySymbol = 'X';
                 myTurn = true;
             } else if (mode === 'online-host') {
                 playerXName.textContent = 'You (X)';
@@ -825,12 +898,14 @@
                 mySymbol = 'X';
                 myTurn = true;
                 isHost = true;
+                myPlayerId = generatePlayerId();
             } else {
                 playerXName.textContent = 'Opponent';
                 playerOName.textContent = 'You (O)';
                 mySymbol = 'O';
                 myTurn = false;
                 isHost = false;
+                myPlayerId = generatePlayerId();
             }
             
             resetGame();
@@ -844,57 +919,50 @@
             if (mode === 'ai') resetGame();
         }
 
-        // ============================================
-        // FIREBASE ONLINE MULTIPLAYER
-        // ============================================
+        function generatePlayerId() {
+            return Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+        }
 
         function generateRoomCode() {
             return Math.random().toString(36).substring(2, 8).toUpperCase();
         }
 
+        // ============================================
+        // ROOM MANAGEMENT - FIXED
+        // ============================================
         async function createRoom() {
             roomId = generateRoomCode();
             roomInput.value = roomId;
+            mySymbol = 'X';
+            myPlayerId = generatePlayerId();
+            isHost = true;
+            opponentConnected = false;
             
             updateOnlineStatus('waiting', 'Room created! Code: ' + roomId);
             showToast('Room created! Share the code.');
             
-            // Show share section
             shareSection.style.display = 'block';
+            playerSlots.style.display = 'flex';
+            slotXName.textContent = 'You ✓';
+            slotOName.textContent = 'Waiting...';
+            
             const currentUrl = window.location.href.split('?')[0];
             shareLink.textContent = currentUrl + '?room=' + roomId;
             
             try {
+                // Create room with player X slot taken
                 await db.collection('rooms').doc(roomId).set({
                     board: ['', '', '', '', '', '', '', '', ''],
                     currentPlayer: 'X',
                     gameActive: true,
-                    playerX: true,
-                    playerO: false,
+                    playerX: { connected: true, playerId: myPlayerId, name: 'Player X' },
+                    playerO: { connected: false, playerId: null, name: 'Waiting...' },
                     lastMove: null,
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    resetRequest: null
                 });
                 
-                roomListener = db.collection('rooms').doc(roomId).onSnapshot((doc) => {
-                    const data = doc.data();
-                    if (!data) return;
-                    
-                    if (data.playerO && playerOName.textContent === 'Waiting...') {
-                        playerOName.textContent = 'Opponent (O)';
-                        updateOnlineStatus('connected', 'Opponent joined! You go first (X).');
-                        showToast('Opponent joined! Game starting...');
-                    }
-                    
-                    if (data.lastMove && data.lastMove.player !== mySymbol) {
-                        board = data.board;
-                        currentPlayer = data.currentPlayer;
-                        gameActive = data.gameActive;
-                        updateBoard();
-                        checkWinner();
-                        myTurn = (currentPlayer === mySymbol);
-                        updateTurnIndicator();
-                    }
-                });
+                listenToRoom();
                 
             } catch (error) {
                 console.error('Error creating room:', error);
@@ -910,8 +978,7 @@
             }
             
             roomId = code;
-            mySymbol = 'O';
-            myTurn = false;
+            myPlayerId = generatePlayerId();
             isHost = false;
             
             updateOnlineStatus('waiting', 'Joining room ' + roomId + '...');
@@ -927,31 +994,40 @@
                 }
                 
                 const data = doc.data();
-                if (data.playerO) {
-                    showToast('Room is full! Only 2 players allowed.');
+                
+                // Check if X slot is empty (X left)
+                if (!data.playerX || !data.playerX.connected) {
+                    // Take X slot
+                    mySymbol = 'X';
+                    await roomRef.update({
+                        'playerX': { connected: true, playerId: myPlayerId, name: 'Player X' }
+                    });
+                    playerXName.textContent = 'You (X)';
+                    playerOName.textContent = data.playerO?.name || 'Opponent';
+                    showToast('Joined as X!');
+                } 
+                // Check if O slot is empty
+                else if (!data.playerO || !data.playerO.connected) {
+                    mySymbol = 'O';
+                    await roomRef.update({
+                        'playerO': { connected: true, playerId: myPlayerId, name: 'Player O' }
+                    });
+                    playerXName.textContent = data.playerX?.name || 'Opponent';
+                    playerOName.textContent = 'You (O)';
+                    showToast('Joined as O!');
+                } 
+                else {
+                    showToast('Room is full! 2 players max.');
                     updateOnlineStatus('disconnected', 'Room is full');
                     return;
                 }
                 
-                await roomRef.update({ playerO: true });
+                shareSection.style.display = 'block';
+                document.querySelector('.share-btn').style.display = 'none';
+                playerSlots.style.display = 'flex';
                 
-                playerXName.textContent = 'Opponent (X)';
-                playerOName.textContent = 'You (O)';
-                updateOnlineStatus('connected', 'Connected! Waiting for X to move...');
-                showToast('Joined! Wait for opponent to start.');
-                
-                roomListener = roomRef.onSnapshot((doc) => {
-                    const data = doc.data();
-                    if (!data) return;
-                    
-                    board = data.board;
-                    currentPlayer = data.currentPlayer;
-                    gameActive = data.gameActive;
-                    updateBoard();
-                    checkWinner();
-                    myTurn = (currentPlayer === mySymbol);
-                    updateTurnIndicator();
-                });
+                updateOnlineStatus('connected', 'Connected! You are ' + mySymbol);
+                listenToRoom();
                 
             } catch (error) {
                 console.error('Error joining room:', error);
@@ -959,23 +1035,106 @@
             }
         }
 
-        async function updateGameState(index, player) {
+        function listenToRoom() {
+            if (roomListener) roomListener();
+            
+            roomListener = db.collection('rooms').doc(roomId).onSnapshot((doc) => {
+                const data = doc.data();
+                if (!data) return;
+                
+                // Update player slots display
+                if (data.playerX) {
+                    slotXName.textContent = data.playerX.connected ? (data.playerX.playerId === myPlayerId ? 'You ✓' : data.playerX.name) : 'Waiting...';
+                }
+                if (data.playerO) {
+                    slotOName.textContent = data.playerO.connected ? (data.playerO.playerId === myPlayerId ? 'You ✓' : data.playerO.name) : 'Waiting...';
+                }
+                
+                // Check if opponent joined/left
+                const xConnected = data.playerX?.connected || false;
+                const oConnected = data.playerO?.connected || false;
+                const bothConnected = xConnected && oConnected;
+                
+                if (bothConnected && !opponentConnected) {
+                    opponentConnected = true;
+                    const opponentSymbol = mySymbol === 'X' ? 'O' : 'X';
+                    updateOnlineStatus('connected', 'Game started! You are ' + mySymbol);
+                    showToast('Opponent joined! Game on!');
+                    
+                    // Update names
+                    if (mySymbol === 'X') {
+                        playerOName.textContent = 'Opponent (O)';
+                    } else {
+                        playerXName.textContent = 'Opponent (X)';
+                    }
+                } else if (!bothConnected && opponentConnected) {
+                    opponentConnected = false;
+                    updateOnlineStatus('waiting', 'Opponent left. Waiting...');
+                    showToast('Opponent left the room');
+                    gameActive = false;
+                }
+                
+                // Handle reset request
+                if (data.resetRequest && data.resetRequest !== myPlayerId) {
+                    board = ['', '', '', '', '', '', '', '', ''];
+                    currentPlayer = 'X';
+                    gameActive = true;
+                    updateBoard();
+                    updateTurnIndicator();
+                    showToast('New game started!');
+                }
+                
+                // Sync game state from opponent moves
+                if (data.lastMove && data.lastMove.playerId !== myPlayerId) {
+                    board = data.board;
+                    currentPlayer = data.currentPlayer;
+                    gameActive = data.gameActive;
+                    updateBoard();
+                    checkWinner();
+                    myTurn = (currentPlayer === mySymbol);
+                    updateTurnIndicator();
+                }
+            });
+        }
+
+        async function leaveRoom() {
             if (!roomId) return;
             
-            const newBoard = [...board];
-            newBoard[index] = player;
-            const nextPlayer = player === 'X' ? 'O' : 'X';
-            
             try {
-                await db.collection('rooms').doc(roomId).update({
-                    board: newBoard,
-                    currentPlayer: nextPlayer,
-                    lastMove: { index, player, timestamp: Date.now() }
-                });
-            } catch (error) {
-                console.error('Update failed:', error);
-                showToast('Connection error! Try again.');
+                const roomRef = db.collection('rooms').doc(roomId);
+                const doc = await roomRef.get();
+                
+                if (doc.exists) {
+                    const data = doc.data();
+                    const updates = {};
+                    
+                    if (mySymbol === 'X' && data.playerX?.playerId === myPlayerId) {
+                        updates['playerX.connected'] = false;
+                        updates['playerX.playerId'] = null;
+                    } else if (mySymbol === 'O' && data.playerO?.playerId === myPlayerId) {
+                        updates['playerO.connected'] = false;
+                        updates['playerO.playerId'] = null;
+                    }
+                    
+                    await roomRef.update(updates);
+                }
+            } catch (e) {
+                console.log('Leave error:', e);
             }
+            
+            leaveRoomSilent();
+            showToast('Left the room');
+            setMode('ai');
+            document.querySelectorAll('.mode-btn')[0].click();
+        }
+
+        function leaveRoomSilent() {
+            if (roomListener) {
+                roomListener();
+                roomListener = null;
+            }
+            roomId = '';
+            opponentConnected = false;
         }
 
         function shareRoom() {
@@ -998,14 +1157,20 @@
         // ============================================
         // GAME LOGIC
         // ============================================
-
         function handleCellClick(e) {
-            const index = e.target.dataset.index;
-            if (index === undefined || board[index] !== '' || !gameActive) return;
+            const index = parseInt(e.target.dataset.index);
+            if (isNaN(index) || board[index] !== '' || !gameActive) return;
             
-            if ((mode === 'online' || mode === 'online-host') && !myTurn) {
-                showToast("Wait for your turn!");
-                return;
+            // Online: check turn and if both players connected
+            if ((mode === 'online' || mode === 'online-host')) {
+                if (!opponentConnected) {
+                    showToast("Waiting for opponent to join...");
+                    return;
+                }
+                if (!myTurn) {
+                    showToast("Wait for your turn!");
+                    return;
+                }
             }
             
             makeMove(index, currentPlayer);
@@ -1045,13 +1210,39 @@
             } else if (mode === 'ai') {
                 text = currentPlayer === 'X' ? 'Your turn' : 'Robot thinking...';
             } else {
-                text = myTurn ? 'Your turn' : "Opponent's turn";
+                if (!opponentConnected) {
+                    text = 'Waiting for opponent...';
+                } else {
+                    text = myTurn ? 'Your turn (' + mySymbol + ')' : "Opponent's turn";
+                }
             }
             turnText.textContent = text;
             turnDot.style.background = currentPlayer === 'X' ? 'var(--accent)' : 'var(--accent2)';
         }
 
-        // AI Logic
+        async function updateGameState(index, player) {
+            if (!roomId) return;
+            
+            const newBoard = [...board];
+            newBoard[index] = player;
+            const nextPlayer = player === 'X' ? 'O' : 'X';
+            
+            try {
+                await db.collection('rooms').doc(roomId).update({
+                    board: newBoard,
+                    currentPlayer: nextPlayer,
+                    gameActive: true,
+                    lastMove: { index, player, playerId: myPlayerId, timestamp: Date.now() }
+                });
+            } catch (error) {
+                console.error('Update failed:', error);
+                showToast('Connection error! Try again.');
+            }
+        }
+
+        // ============================================
+        // AI LOGIC
+        // ============================================
         function makeAIMove() {
             if (!gameActive) return;
             let index;
@@ -1119,6 +1310,9 @@
             }
         }
 
+        // ============================================
+        // WIN CHECKING
+        // ============================================
         function checkGameEnd() {
             const winPatterns = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
             for (let pattern of winPatterns) {
@@ -1174,7 +1368,9 @@
             }
         }
 
-        // UI Functions
+        // ============================================
+        // UI FUNCTIONS
+        // ============================================
         function showModal(emoji, title, message, titleClass) {
             document.getElementById('modalEmoji').textContent = emoji;
             document.getElementById('modalTitle').textContent = title;
@@ -1200,24 +1396,29 @@
             onlineStatus.textContent = text;
         }
 
-        function resetGame() {
+        async function resetGame() {
             board = ['', '', '', '', '', '', '', '', ''];
             gameActive = true;
             currentPlayer = 'X';
-            myTurn = (mode === 'ai' || mode === 'local' || (mode === 'online-host'));
+            myTurn = (mode === 'ai' || mode === 'local' || (mode === 'online-host' && mySymbol === 'X'));
             cells.forEach(cell => {
                 cell.textContent = '';
                 cell.className = 'cell';
             });
             updateTurnIndicator();
             
-            if ((mode === 'online' || mode === 'online-host') && roomId && isHost) {
-                db.collection('rooms').doc(roomId).update({
-                    board: ['', '', '', '', '', '', '', '', ''],
-                    currentPlayer: 'X',
-                    gameActive: true,
-                    lastMove: null
-                }).catch(err => console.log('Reset error:', err));
+            if ((mode === 'online' || mode === 'online-host') && roomId) {
+                try {
+                    await db.collection('rooms').doc(roomId).update({
+                        board: ['', '', '', '', '', '', '', '', ''],
+                        currentPlayer: 'X',
+                        gameActive: true,
+                        lastMove: null,
+                        resetRequest: myPlayerId
+                    });
+                } catch (err) {
+                    console.log('Reset error:', err);
+                }
             }
         }
 
@@ -1231,7 +1432,9 @@
             }
         }
 
-        // Effects
+        // ============================================
+        // EFFECTS
+        // ============================================
         function createConfetti() {
             const colors = ['#00d4ff', '#ff006e', '#00ff88', '#ffc107', '#ff4757'];
             for (let i = 0; i < 50; i++) {
@@ -1277,19 +1480,21 @@
                     oscillator.stop(audioCtx.currentTime + 0.4);
                 }
             } catch (e) {
-                console.log('Audio not supported');
+                // Audio not supported
             }
         }
 
-        // Check URL for room code on load
+        // ============================================
+        // URL HANDLING
+        // ============================================
         function checkUrlRoom() {
             const urlParams = new URLSearchParams(window.location.search);
             const room = urlParams.get('room');
             if (room) {
                 roomInput.value = room.toUpperCase();
                 setTimeout(() => {
-                    document.querySelectorAll('.mode-btn')[2].click(); // Select Join Room
-                    showToast('Room code found in URL! Click Connect to join.');
+                    document.querySelectorAll('.mode-btn')[2].click();
+                    showToast('Room code found! Click Connect to join.');
                 }, 500);
             }
         }
@@ -1301,6 +1506,22 @@
             if (now - lastTouchEnd <= 300) e.preventDefault();
             lastTouchEnd = now;
         }, false);
+
+        // Handle page unload - leave room
+        window.addEventListener('beforeunload', () => {
+            if (roomId && (mode === 'online' || mode === 'online-host')) {
+                const roomRef = db.collection('rooms').doc(roomId);
+                const updates = {};
+                if (mySymbol === 'X') {
+                    updates['playerX.connected'] = false;
+                    updates['playerX.playerId'] = null;
+                } else {
+                    updates['playerO.connected'] = false;
+                    updates['playerO.playerId'] = null;
+                }
+                roomRef.update(updates);
+            }
+        });
 
         // Initialize
         init();
